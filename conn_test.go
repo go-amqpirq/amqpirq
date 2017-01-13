@@ -8,14 +8,14 @@ import (
 	"time"
 )
 
-type dummyListener struct {
+type dummyWorker struct {
 	started bool
 	ended   bool
 }
 
-func (d *dummyListener) Listen(conn *amqp.Connection, ch <-chan struct{}) {
+func (d *dummyWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
 	d.started = true
-	<-ch
+	<-done
 	d.ended = true
 }
 
@@ -24,10 +24,7 @@ func TestDial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cap(c.ch) == 0 {
-		t.Error("Expected buffered chan got cap=")
-	}
-	if c.ch == nil {
+	if c.done == nil {
 		t.Error("Expected chan got <nil>")
 	}
 	if got, want := c.MaxAttempts, defaultMaxAttempts; got != want {
@@ -43,11 +40,8 @@ func TestDialTLS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ch == nil {
+	if c.done == nil {
 		t.Error("Expected chan got <nil>")
-	}
-	if cap(c.ch) == 0 {
-		t.Error("Expected buffered chan got cap=0")
 	}
 	if got, want := c.MaxAttempts, defaultMaxAttempts; got != want {
 		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
@@ -65,11 +59,56 @@ func TestConnection_Listen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ch == nil {
+	if c.done == nil {
 		t.Error("Expected chan got <nil>")
 	}
-	if cap(c.ch) == 0 {
-		t.Error("Expected buffered chan got cap=")
+	if got, want := c.MaxAttempts, defaultMaxAttempts; got != want {
+		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
+	}
+	if got, want := c.Delay, defaultDelay; got != want {
+		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
+	}
+	c.MaxAttempts = 2
+	c.Delay = 0
+
+	worker := new(dummyWorker)
+	worker1 := new(dummyWorker)
+	go c.Listen(worker)
+	go c.Listen(worker1)
+
+	for {
+		if worker.started {
+			break
+		}
+	}
+	for {
+		if worker1.started {
+			break
+		}
+	}
+	c.Close()
+	for {
+		if worker.ended {
+			break
+		}
+	}
+	for {
+		if worker1.ended {
+			break
+		}
+	}
+}
+
+func TestConnection_ListenOnClosed(t *testing.T) {
+	if amqpURI() == "" {
+		t.Skip("Environment variable AMQP_URI not set")
+	}
+	c, err := Dial(amqpURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.done == nil {
+		t.Error("Expected chan got <nil>")
 	}
 	if got, want := c.MaxAttempts, defaultMaxAttempts; got != want {
 		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
@@ -79,20 +118,19 @@ func TestConnection_Listen(t *testing.T) {
 	}
 	c.MaxAttempts = 1
 	c.Delay = 0
-
-	listener := new(dummyListener)
-	go c.Listen(listener)
-
-	for {
-		if listener.started {
-			break
-		}
+	c.Close()
+	if got, want := c.closing, true; got != want {
+		t.Errorf("Expected closing=%b, got=%b", want, got)
 	}
 	c.Close()
-	for {
-		if listener.ended {
-			break
-		}
+	if got, want := c.closing, true; got != want {
+		t.Errorf("Expected closing=%b, got=%b", want, got)
+	}
+
+	worker := new(dummyWorker)
+	err = c.Listen(worker)
+	if err == nil {
+		t.Fatal("Expected error got <nil>")
 	}
 }
 
@@ -103,21 +141,21 @@ func TestConnection_ListenInvalidURI(t *testing.T) {
 	}
 	c.MaxAttempts = 2
 	c.Delay = 0
-	err = c.Listen(new(dummyListener))
+	err = c.Listen(new(dummyWorker))
 	if err == nil {
 		t.Fatal("Expected error got <nil>")
 	}
 }
 
 func TestNewParallelMessageListener_InvalidSize(t *testing.T) {
-	_, err := NewParallelMessageListener("", 0, nil)
+	_, err := NewParallelMessageWorker("", 0, nil)
 	if err == nil {
 		t.Fatal("Expected error, got <nil>")
 	}
 }
 
 func TestNewParallelMessageListener_MissingQueue(t *testing.T) {
-	_, err := NewParallelMessageListener("", 1, nil)
+	_, err := NewParallelMessageWorker("", 1, nil)
 	if err == nil {
 		t.Fatal("Expected error, got <nil>")
 	}
@@ -140,11 +178,8 @@ func TestConnection_ListenParallelMessageListener(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.ch == nil {
+	if c.done == nil {
 		t.Error("Expected chan got <nil>")
-	}
-	if cap(c.ch) == 0 {
-		t.Error("Expected buffered chan got cap=")
 	}
 	if got, want := c.MaxAttempts, defaultMaxAttempts; got != want {
 		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
@@ -173,10 +208,10 @@ func TestConnection_ListenParallelMessageListener(t *testing.T) {
 	defer ch.QueueDelete(tempQ.Name, false, false, false)
 
 	consumer := new(dummyDeliveryConsumer)
-	listener, err := NewParallelMessageListener(tempQ.Name, 1, consumer)
-	go c.Listen(listener)
+	worker, err := NewParallelMessageWorker(tempQ.Name, 1, consumer)
+	go c.Listen(worker)
 
-	corrID := "XYZ"
+	corrID := randomString(16)
 
 	ch.Publish("", tempQ.Name, false, false, amqp.Publishing{
 		CorrelationId: corrID,
@@ -198,9 +233,9 @@ func TestConnection_ListenParallelMessageListener(t *testing.T) {
 
 func amqpURI() string { return os.Getenv("AMQP_URI") }
 
-func randomString(l int) string {
-	bytes := make([]byte, l)
-	for i := 0; i < l; i++ {
+func randomString(i int) string {
+	bytes := make([]byte, i)
+	for i := 0; i < i; i++ {
 		bytes[i] = byte(randInt(65, 90))
 	}
 	return string(bytes)

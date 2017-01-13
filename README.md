@@ -11,9 +11,9 @@ connect after `conn.Delay` seconds (by default `30`).
 It is possible to start multiple listeners on a single connection in separate
 goroutines. The underlying `amqp.Connection` is expected to be thread safe.
 
-An interruptible connection can be configured using one of three `Dial` 
-functions that map to related `amqp.Dial` functions: `amqpirq.Dial`, 
-`amqpirq.DialTLS` and `amqpirq.DialConfig`.
+An interruptible connection can be configured using one of three `Dial[...]` 
+functions that map to related `amqp.Dial[...]` functions respectively: 
+`amqpirq.Dial`, `amqpirq.DialTLS` and `amqpirq.DialConfig`.
 
 
 ## Status
@@ -39,64 +39,22 @@ import "gopkg.in/amqpirq.v0"
 
 ### Example
 
-Implement `amqpirq.MessageListener` sensitive to interruption of the connection, 
-e.g. auto-ack should be avoided (deliveries should be acknowledged only after 
-successful processing), check status of the `chan` and interrupt routines 
-after the channel had been closed:
+Implement `amqpirq.DeliveryConsumer` interface providing your business logic to
+handle inbound `amqp.Delivery`. NOTE: *remember to acknowledge the delivery by 
+invoking `d.Ack` or `d.Reject` as required by the business flow of your 
+application*:
 
 ~~~go
-type AsyncMessageListener struct {
+type MyDeliveryConsumer struct {
 }
  
-func (*AsyncMessageListener) Listen(conn *amqp.Connection, alive <-chan struct{}) {
-        ch, err := conn.Channel()
-        if err != nil {
-                panic(err)
-        }
-        defer ch.Close()
-        
-        ...
-        
-        wrkCh := make(chan amqp.Delivery, 1)
-        
-        msgs, err := ch.Consume(
-                q.Name, // queue
-                "",     // consumer
-                false,  // auto-ack
-                false,  // exclusive
-                false,  // no-local
-                false,  // no-wait
-                nil,    // args
-        )
-        if err != nil {
-                panic(err)
-        }
-        		
-        go func() {
-                for {
-                        select {
-                        case d := <-wrkCh:
-                                if err := processDelivery(d.Body); err != nil {
-                                        d.Reject(false)
-                                } else {
-                                        d.Ack(false)
-                                }
-                        case <-alive:
-                                // avoid leaking goroutines
-                                return
-                        }
-                }
-        }()
-        
-        for d := range msgs {
-                wrkCh <- d
-        }
-        
-        <-alive
+func (*MyDeliveryConsumer) Consume(ch *amqp.Channel, d *amqp.Delivery) {
+        defer d.Ack(false)
+        doStuff(&d)
 }
 ~~~
 
-Set-up interruptible connection and start listener(s)
+Configure parallel worker for the consumer, e.g.:
 
 ~~~go
 ...
@@ -106,11 +64,32 @@ if err != nil {
 }
 defer conn.Close()
  
-listener := new(AsyncMessageListener)
-go conn.Listen(listener)
+consumer := new(DeliveryConsumer)
+queueName := "work_queue"
+numWorkers := 16
+worker := NewParallelMessageWorker(queueName, numWorkers, consumer)
+go conn.Listen(worker)
 ...
 ~~~
 
+Alternatively, implement `amqpirq.MessageWorker` interface and start
+`amqpirq.Connection.Listen` using specialised worker, e.g.:
+
+~~~go
+type MyMessageWorker struct {
+}
+ 
+func (*MyMessageWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
+        for {
+                select {
+                case <-done:
+                        return
+                default:
+                        ...
+                }
+        }
+}
+~~~
 
 ## Testing
 

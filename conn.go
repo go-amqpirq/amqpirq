@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/streadway/amqp"
+	"sync"
 	"time"
 )
 
@@ -28,12 +29,12 @@ var (
 	}
 )
 
-// MessageListener is enabling configuring channels and queues to implement
-// client code depending on amqp.Connection to the broker. The Listen is
-// invoked in a goroutine and the channel is closed when either a connection
-// to the broker is lost or the amqpirq.Connection is closed.
-type MessageListener interface {
-	Listen(*amqp.Connection, <-chan struct{})
+// MessageWorker is enabling configuring channels and queues to implement
+// client code depending on amqp.Connection to the broker. The Do function is
+// usually invoked in a goroutine and the channel is closed when either a
+// connection to the broker is lost or the amqpirq.Connection is closed.
+type MessageWorker interface {
+	Do(*amqp.Connection, <-chan struct{})
 }
 
 // Connection facilitates interruptible connectivity to RabbitMQ broker,
@@ -44,9 +45,11 @@ type Connection struct {
 	// is returned
 	MaxAttempts int
 	// Delay is number of seconds to wait before re-attempting connection
-	Delay uint
-	ch    chan *struct{}
-	dial  func() (*amqp.Connection, error)
+	Delay   uint
+	done    chan struct{}
+	dial    func() (*amqp.Connection, error)
+	closing bool
+	mutex   sync.Mutex
 }
 
 // Dial is a wrapper around amqp.Dial that accepts a string in the AMQP URI
@@ -74,34 +77,46 @@ func dialFunc(dial func() (*amqp.Connection, error)) (*Connection, error) {
 		MaxAttempts: defaultMaxAttempts,
 		Delay:       defaultDelay,
 		dial:        dial,
-		ch:          make(chan *struct{}, 64),
+		done:        make(chan struct{}),
 	}, nil
 
 }
 
-// Close sends a close signal to all MessageListener-s
-func (c *Connection) Close() {
-	select {
-	case c.ch <- new(struct{}):
-	// ok
-	default:
+// Close sends a done signal to all MessageWorkers
+func (conn *Connection) Close() {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	if conn.closing {
+		return
 	}
+	conn.closing = true
+	close(conn.done)
 }
 
-func (c *Connection) Listen(listener MessageListener) (err error) {
+func (conn *Connection) Listen(worker MessageWorker) (err error) {
+	conn.mutex.Lock()
+	if conn.closing {
+		return errors.New("amqpirq: unable to listen on closed connection")
+	}
+	conn.mutex.Unlock()
 	attemptCount := 0
 	for {
 		attemptCount++
-		err = serveAttempt(c.dial, c.ch, listener)
-		if c.MaxAttempts > 0 && attemptCount >= c.MaxAttempts {
+		err = serveAttempt(conn.dial, conn.done, worker)
+		if conn.MaxAttempts > 0 && attemptCount >= conn.MaxAttempts {
 			break
 		}
-		time.Sleep(time.Duration(c.Delay) * time.Second)
+		conn.mutex.Lock()
+		if conn.closing {
+			break
+		}
+		conn.mutex.Unlock()
+		time.Sleep(time.Duration(conn.Delay) * time.Second)
 	}
 	return
 }
 
-func serveAttempt(dial func() (*amqp.Connection, error), closing chan *struct{}, listener MessageListener) error {
+func serveAttempt(dial func() (*amqp.Connection, error), done <-chan struct{}, worker MessageWorker) error {
 	conn, err := dial()
 	if err != nil {
 		return err
@@ -111,7 +126,7 @@ func serveAttempt(dial func() (*amqp.Connection, error), closing chan *struct{},
 	go func() {
 		for {
 			select {
-			case <-closing:
+			case <-done:
 				conn.Close()
 			default:
 			}
@@ -134,7 +149,7 @@ func serveAttempt(dial func() (*amqp.Connection, error), closing chan *struct{},
 
 	conn.NotifyClose(connErr)
 
-	go listener.Listen(conn, forever)
+	go worker.Do(conn, forever)
 
 	<-forever
 
@@ -149,7 +164,7 @@ type DeliveryConsumer interface {
 
 // ParallelMessageListener is a parallel and asynchronous implementation of
 // MessageListener
-type ParallelMessageListener struct {
+type ParallelMessageWorker struct {
 	consumer DeliveryConsumer
 	size     int
 	qn       string
@@ -158,30 +173,30 @@ type ParallelMessageListener struct {
 // NewParallelMessageListener returns new MessageListener with a fixed pool
 // size - size for the queue qn. Inbound messages are processed using
 // DeliveryConsumer consumer.
-func NewParallelMessageListener(qn string, size int, consumer DeliveryConsumer) (MessageListener, error) {
+func NewParallelMessageWorker(qn string, size int, consumer DeliveryConsumer) (MessageWorker, error) {
 	if size < 1 {
 		return nil, errors.New("amqpirq: pool size is required")
 	}
 	if qn == "" {
 		return nil, errors.New("amqpirq: queue name is required")
 	}
-	return ParallelMessageListener{
+	return ParallelMessageWorker{
 		consumer: consumer,
 		size:     size,
 		qn:       qn,
 	}, nil
 }
 
-func (ml ParallelMessageListener) Listen(conn *amqp.Connection, alive <-chan struct{}) {
+func (worker ParallelMessageWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
 	ch, err := conn.Channel()
 	failOnError(err, "failed to open a channel")
 	defer ch.Close()
 
-	q, err := NamedReplyQueue(ch, ml.qn)
+	q, err := NamedReplyQueue(ch, worker.qn)
 	failOnError(err, "failed to declare a queue")
 
 	err = ch.Qos(
-		ml.size,
+		worker.size,
 		0,
 		false,
 	)
@@ -198,15 +213,15 @@ func (ml ParallelMessageListener) Listen(conn *amqp.Connection, alive <-chan str
 	)
 	failOnError(err, "failed to register a consumer")
 
-	wrkCh := make(chan amqp.Delivery, ml.size)
+	wrkCh := make(chan amqp.Delivery, worker.size)
 
-	for i := 0; i < ml.size; i++ {
+	for i := 0; i < worker.size; i++ {
 		go func() {
 			for {
 				select {
 				case d := <-wrkCh:
-					ml.consumer.Consume(ch, &d)
-				case <-alive:
+					worker.consumer.Consume(ch, &d)
+				case <-done:
 					// avoid leaking goroutines
 					return
 				}
@@ -217,7 +232,7 @@ func (ml ParallelMessageListener) Listen(conn *amqp.Connection, alive <-chan str
 	for d := range msgs {
 		wrkCh <- d
 	}
-	<-alive
+	<-done
 }
 
 func failOnError(err error, msg string) {

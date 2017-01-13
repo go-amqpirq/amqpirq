@@ -16,11 +16,11 @@ const (
 
 var (
 	// NamedReplyQueue is a lambda for a amqp.Queue qn definition on
-	// amqp.Channel ch. The queue is defined as non-durable, non-exclusive
+	// amqp.Channel ch. The queue is defined as durable, non-exclusive
 	NamedReplyQueue = func(ch *amqp.Channel, qn string) (amqp.Queue, error) {
 		return ch.QueueDeclare(
 			qn,    // name
-			false, // durable
+			true,  // durable
 			false, // delete when unused
 			false, // exclusive
 			false, // no-wait

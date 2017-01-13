@@ -67,7 +67,10 @@ defer conn.Close()
 consumer := new(MyDeliveryConsumer)
 queueName := "work_queue"
 numWorkers := 16
-worker := NewParallelMessageWorker(queueName, numWorkers, consumer)
+worker, err := NewParallelMessageWorker(queueName, numWorkers, consumer)
+if err != nil {
+        panic(err)
+}
 go conn.Listen(worker)
 ...
 ~~~

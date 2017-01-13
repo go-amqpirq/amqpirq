@@ -64,7 +64,7 @@ if err != nil {
 }
 defer conn.Close()
  
-consumer := new(DeliveryConsumer)
+consumer := new(MyDeliveryConsumer)
 queueName := "work_queue"
 numWorkers := 16
 worker := NewParallelMessageWorker(queueName, numWorkers, consumer)

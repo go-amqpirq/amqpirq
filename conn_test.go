@@ -168,14 +168,14 @@ func TestConnection_ListenInvalidURI(t *testing.T) {
 }
 
 func TestNewParallelMessageListener_InvalidSize(t *testing.T) {
-	_, err := NewParallelConnectionWorker("", 0, nil)
+	_, err := NewParallelConnectionWorker(nil, 0, nil)
 	if err == nil {
 		t.Fatal("Expected error, got <nil>")
 	}
 }
 
 func TestNewParallelMessageListener_MissingQueue(t *testing.T) {
-	_, err := NewParallelConnectionWorker("", 1, nil)
+	_, err := NewParallelConnectionWorker(nil, 1, nil)
 	if err == nil {
 		t.Fatal("Expected error, got <nil>")
 	}
@@ -255,19 +255,19 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ch.Close()
-	tempQ, err := NamedReplyQueue(ch, randomString(10))
+	tempQ := randomString(12)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ch.QueueDelete(tempQ.Name, false, false, false)
+	defer ch.QueueDelete(tempQ, false, false, false)
 
 	consumer := new(dummyDeliveryConsumer)
-	worker, err := NewParallelConnectionWorker(tempQ.Name, 1, consumer)
+	worker, err := NewParallelConnectionWorker(func(ch *amqp.Channel) (amqp.Queue, error) { return NamedReplyQueue(ch, tempQ) }, 1, consumer)
 	go c.Listen(worker)
 
 	corrID := randomString(16)
 
-	ch.Publish("", tempQ.Name, false, false, amqp.Publishing{
+	ch.Publish("", tempQ, false, false, amqp.Publishing{
 		CorrelationId: corrID,
 		Body:          []byte(corrID),
 	})

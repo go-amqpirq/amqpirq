@@ -172,12 +172,12 @@ type DeliveryConsumer interface {
 
 // FixedChannelWorker is a fixed prefetch parallel processing worker
 type FixedChannelWorker struct {
-	queue    string
+	queue    func(ch *amqp.Channel) (amqp.Queue, error)
 	size     int
 	consumer DeliveryConsumer
 }
 
-func NewFixedChannelWorker(queue string, size int, consumer DeliveryConsumer) ChannelWorker {
+func NewFixedChannelWorker(queue func(ch *amqp.Channel) (amqp.Queue, error), size int, consumer DeliveryConsumer) ChannelWorker {
 	return FixedChannelWorker{
 		size:     size,
 		consumer: consumer,
@@ -186,7 +186,7 @@ func NewFixedChannelWorker(queue string, size int, consumer DeliveryConsumer) Ch
 }
 
 func (worker FixedChannelWorker) Do(ch *amqp.Channel, done <-chan struct{}) {
-	q, err := NamedReplyQueue(ch, worker.queue)
+	q, err := worker.queue(ch)
 	failOnError(err, "failed to declare a queue")
 
 	err = ch.Qos(
@@ -245,14 +245,14 @@ func NewConnectionWorker(worker ChannelWorker) ConnectionWorker {
 // NewParallelConnectionWorker returns new ConnectionWorker with a fixed pool
 // size for the queue qn. Inbound messages are processed using DeliveryConsumer
 // consumer.
-func NewParallelConnectionWorker(qn string, size int, consumer DeliveryConsumer) (ConnectionWorker, error) {
+func NewParallelConnectionWorker(queue func(ch *amqp.Channel) (amqp.Queue, error), size int, consumer DeliveryConsumer) (ConnectionWorker, error) {
 	if size < 1 {
 		return nil, errors.New("amqpirq: pool size is required")
 	}
-	if qn == "" {
-		return nil, errors.New("amqpirq: queue name is required")
+	if queue == nil {
+		return nil, errors.New("amqpirq: queue maker is required")
 	}
-	processor := NewFixedChannelWorker(qn, size, consumer)
+	processor := NewFixedChannelWorker(queue, size, consumer)
 	return ParallelConnectionWorker{
 		processor: processor,
 	}, nil

@@ -72,9 +72,9 @@ if err != nil {
 defer conn.Close()
  
 consumer := new(MyDeliveryConsumer)
-queueName := "work_queue"
+queueMaker := func(ch *amqp.Channel) (amqp.Queue, error) { return amqpirq.NamedReplyQueue(ch, "work_queue") }
 numWorkers := 16
-worker, err := NewParallelConnectionWorker(queueName, numWorkers, consumer)
+worker, err := NewParallelConnectionWorker(queueMaker, numWorkers, consumer)
 if err != nil {
         panic(err)
 }

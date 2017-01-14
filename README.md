@@ -37,7 +37,14 @@ go get gopkg.in/amqpirq.v0
 import "gopkg.in/amqpirq.v0"
 ~~~
 
-### Example
+### Examples
+
+Depending on level of control required by implementing application, it is 
+possible to integrate `amqpirq` with business logic for `amqp.Delivery`,
+`amqp.Channel` or `amqp.Connection`
+
+
+#### `amqp.Delivery`
 
 Implement `amqpirq.DeliveryConsumer` interface providing your business logic to
 handle inbound `amqp.Delivery`. NOTE: *remember to acknowledge the delivery by 
@@ -54,7 +61,7 @@ func (*MyDeliveryConsumer) Consume(ch *amqp.Channel, d *amqp.Delivery) {
 }
 ~~~
 
-Configure parallel worker for the consumer, e.g.:
+Configure parallel connection worker for the consumer `MyDeliveryConsumer`, e.g.:
 
 ~~~go
 ...
@@ -67,7 +74,7 @@ defer conn.Close()
 consumer := new(MyDeliveryConsumer)
 queueName := "work_queue"
 numWorkers := 16
-worker, err := NewParallelMessageWorker(queueName, numWorkers, consumer)
+worker, err := NewParallelConnectionWorker(queueName, numWorkers, consumer)
 if err != nil {
         panic(err)
 }
@@ -75,23 +82,63 @@ go conn.Listen(worker)
 ...
 ~~~
 
-Alternatively, implement `amqpirq.MessageWorker` interface and start
+#### `amqp.Channel`
+
+Implement `amqpirq.ChannelWorker` interface to integrate requirements for
+interacting directly with `amqp.Channel`, e.g.:
+
+~~~go
+type MyChannelWorker struct {
+}
+ 
+func (*MyChannelWorker) Do(ch *amqp.Channel, done <-chan struct{}) {
+        // do things with channel
+        <-done
+}
+~~~
+
+Configure connection worker for the channel processor `MyChannelWorker`, e.g.:
+
+~~~go
+...
+conn, err := amqpirq.Dial("amqp://guest:guest@127.0.0.1:5672//")
+if err != nil {
+        panic(err)
+}
+defer conn.Close()
+ 
+processor := new(MyChannelWorker)
+worker := NewConnectionWorker(processor)
+if err != nil {
+        panic(err)
+}
+go conn.Listen(worker)
+...
+~~~
+
+#### `amqp.Connection`
+
+Implement `amqpirq.ConnectionWorker` interface and start
 `amqpirq.Connection.Listen` using specialised worker, e.g.:
 
 ~~~go
-type MyMessageWorker struct {
+type MyConnectionWorker struct {
 }
  
-func (*MyMessageWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
-        for {
-                select {
-                case <-done:
-                        return
-                default:
-                        ...
-                }
-        }
+func (*MyConnectionWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
+        // to things with connection
+        <-done
 }
+
+...
+conn, err := amqpirq.Dial("amqp://guest:guest@127.0.0.1:5672//")
+if err != nil {
+        panic(err)
+}
+defer conn.Close()
+ 
+go conn.Listen(new(MyConnectionWorker))
+...
 ~~~
 
 ## Testing

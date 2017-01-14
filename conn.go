@@ -29,12 +29,20 @@ var (
 	}
 )
 
-// MessageWorker is enabling configuring channels and queues to implement
+// ConnectionWorker is enabling configuring channels and queues to implement
 // client code depending on amqp.Connection to the broker. The Do function is
 // usually invoked in a goroutine and the channel is closed when either a
 // connection to the broker is lost or the amqpirq.Connection is closed.
-type MessageWorker interface {
+type ConnectionWorker interface {
 	Do(*amqp.Connection, <-chan struct{})
+}
+
+// ChannelWorker is enabling configuring queues to implement client code
+// depending on amqp.Channel. The Do function is usually invoked in a goroutine
+// and the channel is closed when either a connection to the broker is lost or
+// the amqpirq.Connection is closed.
+type ChannelWorker interface {
+	Do(*amqp.Channel, <-chan struct{})
 }
 
 // Connection facilitates interruptible connectivity to RabbitMQ broker,
@@ -93,7 +101,7 @@ func (conn *Connection) Close() {
 	close(conn.done)
 }
 
-func (conn *Connection) Listen(worker MessageWorker) (err error) {
+func (conn *Connection) Listen(worker ConnectionWorker) (err error) {
 	conn.mutex.Lock()
 	if conn.closing {
 		return errors.New("amqpirq: unable to listen on closed connection")
@@ -116,7 +124,7 @@ func (conn *Connection) Listen(worker MessageWorker) (err error) {
 	return
 }
 
-func serveAttempt(dial func() (*amqp.Connection, error), done <-chan struct{}, worker MessageWorker) error {
+func serveAttempt(dial func() (*amqp.Connection, error), done <-chan struct{}, worker ConnectionWorker) error {
 	conn, err := dial()
 	if err != nil {
 		return err
@@ -162,37 +170,23 @@ type DeliveryConsumer interface {
 	Consume(*amqp.Channel, *amqp.Delivery)
 }
 
-// ParallelMessageListener is a parallel and asynchronous implementation of
-// MessageListener
-type ParallelMessageWorker struct {
-	consumer DeliveryConsumer
+// FixedChannelWorker is a fixed prefetch parallel processing worker
+type FixedChannelWorker struct {
+	queue    string
 	size     int
-	qn       string
+	consumer DeliveryConsumer
 }
 
-// NewParallelMessageListener returns new MessageListener with a fixed pool
-// size - size for the queue qn. Inbound messages are processed using
-// DeliveryConsumer consumer.
-func NewParallelMessageWorker(qn string, size int, consumer DeliveryConsumer) (MessageWorker, error) {
-	if size < 1 {
-		return nil, errors.New("amqpirq: pool size is required")
-	}
-	if qn == "" {
-		return nil, errors.New("amqpirq: queue name is required")
-	}
-	return ParallelMessageWorker{
-		consumer: consumer,
+func NewFixedChannelWorker(queue string, size int, consumer DeliveryConsumer) ChannelWorker {
+	return FixedChannelWorker{
 		size:     size,
-		qn:       qn,
-	}, nil
+		consumer: consumer,
+		queue:    queue,
+	}
 }
 
-func (worker ParallelMessageWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
-	ch, err := conn.Channel()
-	failOnError(err, "failed to open a channel")
-	defer ch.Close()
-
-	q, err := NamedReplyQueue(ch, worker.qn)
+func (worker FixedChannelWorker) Do(ch *amqp.Channel, done <-chan struct{}) {
+	q, err := NamedReplyQueue(ch, worker.queue)
 	failOnError(err, "failed to declare a queue")
 
 	err = ch.Qos(
@@ -233,6 +227,43 @@ func (worker ParallelMessageWorker) Do(conn *amqp.Connection, done <-chan struct
 		wrkCh <- d
 	}
 	<-done
+}
+
+// ParallelConnectionWorker is a parallel and asynchronous implementation of
+// ConnectionWorker
+type ParallelConnectionWorker struct {
+	processor ChannelWorker
+}
+
+// NewConnectionWorker returns new ConnectionWorker with .
+func NewConnectionWorker(worker ChannelWorker) ConnectionWorker {
+	return ParallelConnectionWorker{
+		processor: worker,
+	}
+}
+
+// NewParallelConnectionWorker returns new ConnectionWorker with a fixed pool
+// size for the queue qn. Inbound messages are processed using DeliveryConsumer
+// consumer.
+func NewParallelConnectionWorker(qn string, size int, consumer DeliveryConsumer) (ConnectionWorker, error) {
+	if size < 1 {
+		return nil, errors.New("amqpirq: pool size is required")
+	}
+	if qn == "" {
+		return nil, errors.New("amqpirq: queue name is required")
+	}
+	processor := NewFixedChannelWorker(qn, size, consumer)
+	return ParallelConnectionWorker{
+		processor: processor,
+	}, nil
+}
+
+func (worker ParallelConnectionWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
+	ch, err := conn.Channel()
+	failOnError(err, "failed to open a channel")
+	defer ch.Close()
+
+	worker.processor.Do(ch, done)
 }
 
 func failOnError(err error, msg string) {

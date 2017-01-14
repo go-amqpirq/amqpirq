@@ -8,12 +8,32 @@ import (
 	"time"
 )
 
-type dummyWorker struct {
+type dummyConnWorker struct {
 	started bool
 	ended   bool
 }
 
-func (d *dummyWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
+func (d *dummyConnWorker) Do(conn *amqp.Connection, done <-chan struct{}) {
+	d.started = true
+	<-done
+	d.ended = true
+}
+
+type dummyDeliveryConsumer struct {
+	corrID *string
+}
+
+func (c *dummyDeliveryConsumer) Consume(ch *amqp.Channel, d *amqp.Delivery) {
+	c.corrID = &d.CorrelationId
+	d.Ack(false)
+}
+
+type dummyChanWorker struct {
+	started bool
+	ended   bool
+}
+
+func (d *dummyChanWorker) Do(conn *amqp.Channel, done <-chan struct{}) {
 	d.started = true
 	<-done
 	d.ended = true
@@ -71,8 +91,8 @@ func TestConnection_Listen(t *testing.T) {
 	c.MaxAttempts = 2
 	c.Delay = 0
 
-	worker := new(dummyWorker)
-	worker1 := new(dummyWorker)
+	worker := new(dummyConnWorker)
+	worker1 := new(dummyConnWorker)
 	go c.Listen(worker)
 	go c.Listen(worker1)
 
@@ -127,7 +147,7 @@ func TestConnection_ListenOnClosed(t *testing.T) {
 		t.Errorf("Expected closing=%b, got=%b", want, got)
 	}
 
-	worker := new(dummyWorker)
+	worker := new(dummyConnWorker)
 	err = c.Listen(worker)
 	if err == nil {
 		t.Fatal("Expected error got <nil>")
@@ -141,36 +161,70 @@ func TestConnection_ListenInvalidURI(t *testing.T) {
 	}
 	c.MaxAttempts = 2
 	c.Delay = 0
-	err = c.Listen(new(dummyWorker))
+	err = c.Listen(new(dummyConnWorker))
 	if err == nil {
 		t.Fatal("Expected error got <nil>")
 	}
 }
 
 func TestNewParallelMessageListener_InvalidSize(t *testing.T) {
-	_, err := NewParallelMessageWorker("", 0, nil)
+	_, err := NewParallelConnectionWorker("", 0, nil)
 	if err == nil {
 		t.Fatal("Expected error, got <nil>")
 	}
 }
 
 func TestNewParallelMessageListener_MissingQueue(t *testing.T) {
-	_, err := NewParallelMessageWorker("", 1, nil)
+	_, err := NewParallelConnectionWorker("", 1, nil)
 	if err == nil {
 		t.Fatal("Expected error, got <nil>")
 	}
 }
 
-type dummyDeliveryConsumer struct {
-	corrID *string
+func TestConnection_NewConnectionWorker(t *testing.T) {
+	if amqpURI() == "" {
+		t.Skip("Environment variable AMQP_URI not set")
+	}
+
+	c, err := Dial(amqpURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.done == nil {
+		t.Error("Expected chan got <nil>")
+	}
+	if got, want := c.MaxAttempts, defaultMaxAttempts; got != want {
+		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
+	}
+	if got, want := c.Delay, defaultDelay; got != want {
+		t.Errorf("Expected MaxAttempts=%d, got=%d", want, got)
+	}
+	c.MaxAttempts = 1
+	c.Delay = 0
+
+	conn, err := amqp.Dial(amqpURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	processor := new(dummyChanWorker)
+	worker := NewConnectionWorker(processor)
+	go c.Listen(worker)
+	for {
+		if processor.started {
+			break
+		}
+	}
+	c.Close()
+	for {
+		if processor.ended {
+			break
+		}
+	}
 }
 
-func (c *dummyDeliveryConsumer) Consume(ch *amqp.Channel, d *amqp.Delivery) {
-	c.corrID = &d.CorrelationId
-	d.Ack(false)
-}
-
-func TestConnection_ListenParallelMessageListener(t *testing.T) {
+func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 	if amqpURI() == "" {
 		t.Skip("Environment variable AMQP_URI not set")
 	}
@@ -208,7 +262,7 @@ func TestConnection_ListenParallelMessageListener(t *testing.T) {
 	defer ch.QueueDelete(tempQ.Name, false, false, false)
 
 	consumer := new(dummyDeliveryConsumer)
-	worker, err := NewParallelMessageWorker(tempQ.Name, 1, consumer)
+	worker, err := NewParallelConnectionWorker(tempQ.Name, 1, consumer)
 	go c.Listen(worker)
 
 	corrID := randomString(16)

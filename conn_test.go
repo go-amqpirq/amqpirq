@@ -1,9 +1,12 @@
 package amqpirq
 
 import (
+	"github.com/satori/go.uuid"
 	"github.com/streadway/amqp"
-	"math/rand"
 	"os"
+	"runtime"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 )
@@ -100,22 +103,26 @@ func TestConnection_Listen(t *testing.T) {
 		if worker.started {
 			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 	for {
 		if worker1.started {
 			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 	c.Close()
 	for {
 		if worker.ended {
 			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 	for {
 		if worker1.ended {
 			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 }
 
@@ -255,23 +262,29 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ch.Close()
-	tempQ := randomString(12)
+	tempQ := uuid.NewV4().String()
+	qMaker := func(ch *amqp.Channel) (amqp.Queue, error) {
+		return ch.QueueDeclare(tempQ, false, false, false, false, nil)
+	}
+	_, err = qMaker(ch)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer ch.QueueDelete(tempQ, false, false, false)
 
 	consumer := new(dummyDeliveryConsumer)
-	worker, err := NewParallelConnectionWorker(func(ch *amqp.Channel) (amqp.Queue, error) { return NamedReplyQueue(ch, tempQ) }, 1, consumer)
+	worker, err := NewParallelConnectionWorker(qMaker, 1, consumer)
 	go c.Listen(worker)
 
-	corrID := randomString(16)
+	corrID := uuid.NewV4().String()
 
-	ch.Publish("", tempQ, false, false, amqp.Publishing{
+	err = ch.Publish("", tempQ, false, false, amqp.Publishing{
 		CorrelationId: corrID,
 		Body:          []byte(corrID),
 	})
-
+	if err != nil {
+		t.Fatal(err)
+	}
 	for {
 		if consumer.corrID != nil {
 			break
@@ -285,16 +298,72 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 	time.Sleep(1 * time.Second)
 }
 
-func amqpURI() string { return os.Getenv("AMQP_URI") }
-
-func randomString(i int) string {
-	bytes := make([]byte, i)
-	for i := 0; i < i; i++ {
-		bytes[i] = byte(randInt(65, 90))
+func TestNewParallelConnectionWorkerBulk(t *testing.T) {
+	if amqpURI() == "" {
+		t.Skip("Environment variable AMQP_URI not set")
 	}
-	return string(bytes)
+	c, err := Dial(amqpURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	clientConn, err := amqp.Dial(amqpURI())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientConn.Close()
+
+	clientCh, err := clientConn.Channel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientCh.Close()
+
+	tempQ := uuid.NewV4().String()
+	qMaker := func(ch *amqp.Channel) (amqp.Queue, error) {
+		return ch.QueueDeclare(tempQ, false, false, false, false, nil)
+	}
+	_, err = qMaker(clientCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clientCh.QueueDelete(tempQ, false, false, false)
+	poolSize := 100 * runtime.NumCPU()
+
+	consumer := new(countConsumer)
+	worker, err := NewParallelConnectionWorker(qMaker, poolSize, consumer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go c.Listen(worker)
+
+	batchSize := 120000
+	for i := 0; i < batchSize; i++ {
+		err := clientCh.Publish("", tempQ, false, false, amqp.Publishing{Body: []byte(strconv.FormatInt(int64(i), 10))})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for {
+		if consumer.count == batchSize {
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
 }
 
-func randInt(min int, max int) int {
-	return min + rand.Intn(max-min)
+type countConsumer struct {
+	mutex sync.Mutex
+	count int
 }
+
+func (consumer *countConsumer) Consume(ch *amqp.Channel, d *amqp.Delivery) {
+	consumer.mutex.Lock()
+	defer consumer.mutex.Unlock()
+	consumer.count++
+	d.Ack(false)
+}
+
+func amqpURI() string { return os.Getenv("AMQP_URI") }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/streadway/amqp"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -199,7 +200,7 @@ func (worker FixedChannelWorker) Do(ch *amqp.Channel, done <-chan struct{}) {
 	msgs, err := ch.Consume(
 		q.Name, // queue
 		"",     // consumer
-		true,   // auto-ack
+		false,  // auto-ack
 		false,  // exclusive
 		false,  // no-local
 		false,  // no-wait
@@ -207,7 +208,7 @@ func (worker FixedChannelWorker) Do(ch *amqp.Channel, done <-chan struct{}) {
 	)
 	failOnError(err, "failed to register a consumer")
 
-	wrkCh := make(chan amqp.Delivery, worker.size)
+	wrkCh := make(chan amqp.Delivery, worker.size*runtime.NumCPU())
 
 	for i := 0; i < worker.size; i++ {
 		go func() {

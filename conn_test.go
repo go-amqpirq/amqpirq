@@ -275,6 +275,7 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 	consumer := new(dummyDeliveryConsumer)
 	worker, err := NewParallelConnectionWorker(qMaker, 1, consumer)
 	go c.Listen(worker)
+	time.Sleep(1 * time.Second)
 
 	corrID := uuid.NewV4().String()
 
@@ -289,6 +290,7 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 		if consumer.corrID != nil {
 			break
 		}
+		time.Sleep(1 * time.Second)
 	}
 	if got, want := *consumer.corrID, corrID; got != want {
 		t.Errorf("Expected CorrelationId='%s', got '%s'", want, got)
@@ -329,7 +331,7 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer clientCh.QueueDelete(tempQ, false, false, false)
-	poolSize := 100 * runtime.NumCPU()
+	poolSize := 5 * runtime.NumCPU()
 
 	consumer := new(countConsumer)
 	worker, err := NewParallelConnectionWorker(qMaker, poolSize, consumer)
@@ -337,8 +339,9 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 		t.Fatal(err)
 	}
 	go c.Listen(worker)
+	time.Sleep(1 * time.Second)
 
-	batchSize := 120000
+	batchSize := 100 * runtime.NumCPU()
 	for i := 0; i < batchSize; i++ {
 		err := clientCh.Publish("", tempQ, false, false, amqp.Publishing{Body: []byte(strconv.FormatInt(int64(i), 10))})
 		if err != nil {

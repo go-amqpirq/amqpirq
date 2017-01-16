@@ -274,8 +274,12 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 
 	consumer := new(dummyDeliveryConsumer)
 	worker, err := NewParallelConnectionWorker(qMaker, 1, consumer)
-	go c.Listen(worker)
-	time.Sleep(1 * time.Second)
+	go func() {
+		err := c.Listen(worker)
+		if got, want := err.Error(), `Exception (0) Reason: "<nil> connection error"`; got != want {
+			t.Errorf("Expected error='%s', got='%s'", want, got)
+		}
+	}()
 
 	corrID := uuid.NewV4().String()
 
@@ -308,7 +312,6 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer c.Close()
 
 	clientConn, err := amqp.Dial(amqpURI())
 	if err != nil {
@@ -338,8 +341,12 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go c.Listen(worker)
-	time.Sleep(1 * time.Second)
+	go func() {
+		err := c.Listen(worker)
+		if got, want := err.Error(), `Exception (0) Reason: "<nil> connection error"`; got != want {
+			t.Errorf("Expected error='%s', got='%s'", want, got)
+		}
+	}()
 
 	batchSize := 100 * runtime.NumCPU()
 	for i := 0; i < batchSize; i++ {
@@ -355,6 +362,11 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 		}
 		time.Sleep(1 * time.Second)
 	}
+
+	c.Close()
+	// wait for internal channels to close
+	time.Sleep(1 * time.Second)
+
 }
 
 type countConsumer struct {

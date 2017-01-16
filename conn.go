@@ -16,11 +16,11 @@ const (
 )
 
 var (
-	// NamedReplyQueue is a lambda for a amqp.Queue qn definition on
+	// NamedReplyQueue is a lambda for a amqp.Queue key definition on
 	// amqp.Channel ch. The queue is defined as durable, non-exclusive
-	NamedReplyQueue = func(ch *amqp.Channel, qn string) (amqp.Queue, error) {
+	NamedReplyQueue = func(ch *amqp.Channel, key string) (amqp.Queue, error) {
 		return ch.QueueDeclare(
-			qn,    // name
+			key,   // name
 			true,  // durable
 			false, // delete when unused
 			false, // exclusive
@@ -58,6 +58,7 @@ type Connection struct {
 	done    chan struct{}
 	dial    func() (*amqp.Connection, error)
 	closing bool
+	lasterr error
 	mutex   sync.Mutex
 }
 
@@ -91,7 +92,7 @@ func dialFunc(dial func() (*amqp.Connection, error)) (*Connection, error) {
 
 }
 
-// Close sends a done signal to all MessageWorkers
+// Close sends a done signal to all workers
 func (conn *Connection) Close() {
 	conn.mutex.Lock()
 	defer conn.mutex.Unlock()
@@ -100,6 +101,19 @@ func (conn *Connection) Close() {
 	}
 	conn.closing = true
 	close(conn.done)
+}
+
+// LastError returns last connection error (if any)
+func (conn *Connection) LastError() error {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	return conn.lasterr
+}
+
+func (conn *Connection) seterr(err error) {
+	conn.mutex.Lock()
+	defer conn.mutex.Unlock()
+	conn.lasterr = err
 }
 
 func (conn *Connection) Listen(worker ConnectionWorker) (err error) {
@@ -112,6 +126,7 @@ func (conn *Connection) Listen(worker ConnectionWorker) (err error) {
 	for {
 		attemptCount++
 		err = serveAttempt(conn.dial, conn.done, worker)
+		conn.seterr(err)
 		if conn.MaxAttempts > 0 && attemptCount >= conn.MaxAttempts {
 			break
 		}
@@ -144,15 +159,16 @@ func serveAttempt(dial func() (*amqp.Connection, error), done <-chan struct{}, w
 
 	connErr := make(chan *amqp.Error, 1)
 	forever := make(chan struct{})
-	exErr := make(chan *amqp.Error, 1)
+	exitErr := make(chan error, 1)
 
 	go func() {
 		e := <-connErr
 		if e == nil {
-			e = &amqp.Error{Reason: "<nil> connection error"}
+			exitErr <- nil
+		} else {
+			exitErr <- errors.New(e.Reason)
 		}
-		exErr <- e
-		defer close(exErr)
+		defer close(exitErr)
 		close(forever)
 	}()
 
@@ -162,7 +178,7 @@ func serveAttempt(dial func() (*amqp.Connection, error), done <-chan struct{}, w
 
 	<-forever
 
-	return <-exErr
+	return <-exitErr
 }
 
 // DeliveryConsumer is an interface for handling amqp.Delivery messages
@@ -178,6 +194,18 @@ type FixedChannelWorker struct {
 	consumer DeliveryConsumer
 }
 
+// NewFixedChannelWorker configures fixed size number of workers on amqp.Queue
+// configured using NamedReplyQueue with name key
+func NewFixedChannelWorkerName(key string, size int, consumer DeliveryConsumer) ChannelWorker {
+	return FixedChannelWorker{
+		size:     size,
+		consumer: consumer,
+		queue:    func(ch *amqp.Channel) (amqp.Queue, error) { return NamedReplyQueue(ch, key) },
+	}
+}
+
+// NewFixedChannelWorker configures fixed size number of workers on amqp.Queue
+// declared by lambda queue
 func NewFixedChannelWorker(queue func(ch *amqp.Channel) (amqp.Queue, error), size int, consumer DeliveryConsumer) ChannelWorker {
 	return FixedChannelWorker{
 		size:     size,
@@ -244,8 +272,19 @@ func NewConnectionWorker(worker ChannelWorker) ConnectionWorker {
 }
 
 // NewParallelConnectionWorker returns new ConnectionWorker with a fixed pool
-// size for the queue qn. Inbound messages are processed using DeliveryConsumer
-// consumer.
+// size for the queue key configured using NamedReplyQueue. Inbound messages
+// are processed using DeliveryConsumer consumer.
+func NewParallelConnectionWorkerName(key string, size int, consumer DeliveryConsumer) (ConnectionWorker, error) {
+	return NewParallelConnectionWorker(
+		func(ch *amqp.Channel) (amqp.Queue, error) { return NamedReplyQueue(ch, key) },
+		size,
+		consumer,
+	)
+}
+
+// NewParallelConnectionWorker returns new ConnectionWorker with a fixed pool
+// size for the queue configured using lambda queue. Inbound messages are
+// processed using DeliveryConsumer consumer.
 func NewParallelConnectionWorker(queue func(ch *amqp.Channel) (amqp.Queue, error), size int, consumer DeliveryConsumer) (ConnectionWorker, error) {
 	if size < 1 {
 		return nil, errors.New("amqpirq: pool size is required")

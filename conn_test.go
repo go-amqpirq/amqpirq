@@ -264,7 +264,7 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 	defer ch.Close()
 	tempQ := uuid.NewV4().String()
 	qMaker := func(ch *amqp.Channel) (amqp.Queue, error) {
-		return ch.QueueDeclare(tempQ, false, false, false, false, nil)
+		return ch.QueueDeclare(tempQ, true, false, false, false, nil)
 	}
 	_, err = qMaker(ch)
 	if err != nil {
@@ -273,11 +273,11 @@ func TestConnection_NewParallelConnectionWorker(t *testing.T) {
 	defer ch.QueueDelete(tempQ, false, false, false)
 
 	consumer := new(dummyDeliveryConsumer)
-	worker, err := NewParallelConnectionWorker(qMaker, 1, consumer)
+	worker, err := NewParallelConnectionWorkerName(tempQ, 1, consumer)
 	go func() {
 		err := c.Listen(worker)
-		if got, want := err.Error(), `Exception (0) Reason: "<nil> connection error"`; got != want {
-			t.Errorf("Expected error='%s', got='%s'", want, got)
+		if err != nil {
+			t.Error(err)
 		}
 	}()
 
@@ -327,7 +327,7 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 
 	tempQ := uuid.NewV4().String()
 	qMaker := func(ch *amqp.Channel) (amqp.Queue, error) {
-		return ch.QueueDeclare(tempQ, false, false, false, false, nil)
+		return ch.QueueDeclare(tempQ, true, false, false, false, nil)
 	}
 	_, err = qMaker(clientCh)
 	if err != nil {
@@ -337,14 +337,14 @@ func TestNewParallelConnectionWorkerBulk(t *testing.T) {
 	poolSize := 5 * runtime.NumCPU()
 
 	consumer := new(countConsumer)
-	worker, err := NewParallelConnectionWorker(qMaker, poolSize, consumer)
+	worker, err := NewParallelConnectionWorkerName(tempQ, poolSize, consumer)
 	if err != nil {
 		t.Fatal(err)
 	}
 	go func() {
 		err := c.Listen(worker)
-		if got, want := err.Error(), `Exception (0) Reason: "<nil> connection error"`; got != want {
-			t.Errorf("Expected error='%s', got='%s'", want, got)
+		if err != nil {
+			t.Error(err)
 		}
 	}()
 

@@ -20,7 +20,7 @@ functions that map to related `amqp.Dial[...]` functions respectively:
 
 *Beta*
 
-[![Build Status](https://travis-ci.org/go-amqpirq/amqpirq.svg?branch=master)](https://travis-ci.org/go-amqpirq/amqpirq) [![Coverage Status](https://coveralls.io/repos/github/go-amqpirq/amqpirq/badge.svg?branch=master)](https://coveralls.io/github/go-amqpirq/amqpirq?branch=master)
+[![Build Status](https://travis-ci.org/go-amqpirq/amqpirq.svg?branch=master)](https://travis-ci.org/go-amqpirq/amqpirq) [![Coverage Status](https://coveralls.io/repos/github/go-amqpirq/amqpirq/badge.svg?branch=master)](https://coveralls.io/github/go-amqpirq/amqpirq?branch=master) [![GoDoc](https://godoc.org/github.com/go-amqpirq/amqpirq?status.svg)](https://godoc.org/github.com/go-amqpirq/amqpirq)
 
 
 ## Usage
@@ -28,13 +28,13 @@ functions that map to related `amqp.Dial[...]` functions respectively:
 ### Go get
 
 ~~~
-go get gopkg.in/amqpirq.v0
+go get -u github.com/go-amqpirq/amqpirq
 ~~~
 
 ### Import
 
 ~~~go
-import "gopkg.in/amqpirq.v0"
+import "github.com/go-amqpirq/amqpirq"
 ~~~
 
 ### Examples
